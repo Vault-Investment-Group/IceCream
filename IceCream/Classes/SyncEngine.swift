@@ -17,25 +17,25 @@ public final class SyncEngine {
     
     private let databaseManager: DatabaseManager
     
-    public convenience init(objects: [Syncable], databaseScope: CKDatabase.Scope = .private, container: CKContainer = .default()) {
+    public convenience init(objects: [Syncable], completion: ((Error?) -> Void)? = nil, databaseScope: CKDatabase.Scope = .private, container: CKContainer = .default()) {
         switch databaseScope {
         case .private:
             let privateDatabaseManager = PrivateDatabaseManager(objects: objects, container: container)
-            self.init(databaseManager: privateDatabaseManager)
+            self.init(databaseManager: privateDatabaseManager, completion: completion)
         case .public:
             let publicDatabaseManager = PublicDatabaseManager(objects: objects, container: container)
-            self.init(databaseManager: publicDatabaseManager)
+            self.init(databaseManager: publicDatabaseManager, completion: completion)
         default:
             fatalError("Shared database scope is not supported yet")
         }
     }
     
-    private init(databaseManager: DatabaseManager) {
+    private init(databaseManager: DatabaseManager, completion: ((Error?) -> Void)?) {
         self.databaseManager = databaseManager
-        setup()
+        setup(completion: completion)
     }
     
-    private func setup() {
+    private func setup(completion: ((Error?) -> Void)?) {
         databaseManager.prepare()
         databaseManager.container.accountStatus { [weak self] (status, error) in
             guard let self = self else { return }
@@ -43,14 +43,14 @@ public final class SyncEngine {
             case .available:
                 self.databaseManager.registerLocalDatabase()
                 self.databaseManager.createCustomZonesIfAllowed()
-                self.databaseManager.fetchChangesInDatabase(nil)
+                self.databaseManager.fetchChangesInDatabase(completion)
                 self.databaseManager.resumeLongLivedOperationIfPossible()
                 self.databaseManager.startObservingRemoteChanges()
                 self.databaseManager.startObservingTermination()
                 self.databaseManager.createDatabaseSubscriptionIfHaveNot()
             case .noAccount, .restricted:
                 guard self.databaseManager is PublicDatabaseManager else { break }
-                self.databaseManager.fetchChangesInDatabase(nil)
+                self.databaseManager.fetchChangesInDatabase(completion)
                 self.databaseManager.resumeLongLivedOperationIfPossible()
                 self.databaseManager.startObservingRemoteChanges()
                 self.databaseManager.startObservingTermination()
