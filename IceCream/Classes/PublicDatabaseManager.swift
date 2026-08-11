@@ -19,6 +19,7 @@ final class PublicDatabaseManager: DatabaseManager {
     let database: CKDatabase
     
     let syncObjects: [Syncable]
+    let operationRegistry = OperationRegistry()
     
     init(objects: [Syncable], container: CKContainer) {
         self.syncObjects = objects
@@ -90,6 +91,7 @@ final class PublicDatabaseManager: DatabaseManager {
             }
         }
         
+        operationRegistry.register(queryOperation)
         database.add(queryOperation)
     }
     
@@ -108,6 +110,7 @@ final class PublicDatabaseManager: DatabaseManager {
             
         }
         createOp.qualityOfService = .utility
+        operationRegistry.register(createOp)
         database.add(createOp)
         #endif
     }

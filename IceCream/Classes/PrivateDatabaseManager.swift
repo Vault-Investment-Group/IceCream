@@ -19,6 +19,7 @@ final class PrivateDatabaseManager: DatabaseManager {
     let database: CKDatabase
     
     let syncObjects: [Syncable]
+    let operationRegistry = OperationRegistry()
     
     public init(objects: [Syncable], container: CKContainer) {
         self.syncObjects = objects
@@ -61,6 +62,7 @@ final class PrivateDatabaseManager: DatabaseManager {
             }
         }
         
+        operationRegistry.register(changesOperation)
         database.add(changesOperation)
     }
     
@@ -91,6 +93,7 @@ final class PrivateDatabaseManager: DatabaseManager {
             }
         }
         
+        operationRegistry.register(modifyOp)
         database.add(modifyOp)
     }
     
@@ -110,6 +113,7 @@ final class PrivateDatabaseManager: DatabaseManager {
             self.subscriptionIsLocallyCached = true
         }
         createOp.qualityOfService = .utility
+        operationRegistry.register(createOp)
         database.add(createOp)
         #endif
     }
@@ -191,6 +195,7 @@ final class PrivateDatabaseManager: DatabaseManager {
             callback?(error)
         }
         
+        operationRegistry.register(changesOp)
         database.add(changesOp)
     }
 }

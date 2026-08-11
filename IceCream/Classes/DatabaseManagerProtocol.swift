@@ -39,6 +39,10 @@ protocol DatabaseManager: class {
     func registerLocalDatabase()
     
     func cleanUp()
+
+    /// TV Club fork (tvclub.5): every operation this manager adds is registered here, so
+    /// SyncEngine.stop() can cancel what is still in flight before the engine is dropped.
+    var operationRegistry: OperationRegistry { get }
 }
 
 extension DatabaseManager {
@@ -52,6 +56,14 @@ extension DatabaseManager {
         }
     }
     
+    /// TV Club fork (tvclub.5): cancels every in-flight operation this manager added.
+    /// Called by SyncEngine.stop() BEFORE the app drops its engine reference — without
+    /// this, a second engine's resume pass collides with the first's still-running
+    /// long-lived operations ("another instance of it is already running", SIGABRT).
+    func stopAndCancelOperations() {
+        operationRegistry.cancelAll()
+    }
+
     func resumeLongLivedOperationIfPossible() {
         container.fetchAllLongLivedOperationIDs { [weak self]( opeIDs, error) in
             guard let self = self, error == nil, let ids = opeIDs else { return }
@@ -66,6 +78,7 @@ extension DatabaseManager {
                         // tells we add operation in container. But however it crashes on iOS 15 beta versions.
                         // And the crash log tells us to "CKDatabaseOperations must be submitted to a CKDatabase".
                         // So I guess there must be something changed in the daemon. We temperorily add this availabilty check.
+                        self.operationRegistry.register(modifyOp)
                         if #available(iOS 15, *) {
                             self.database.add(modifyOp)
                         } else {
@@ -136,6 +149,7 @@ extension DatabaseManager {
             }
         }
         
+        operationRegistry.register(modifyOpe)
         database.add(modifyOpe)
     }
     

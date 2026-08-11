@@ -68,6 +68,18 @@ public final class SyncEngine {
 // MARK: Public Method
 extension SyncEngine {
     
+    /// TV Club fork (tvclub.5): cancel every in-flight operation this engine's manager
+    /// added, BEFORE dropping the engine reference. Rapid entitlement transitions create
+    /// and release engines in quick succession; each new engine's setup resumes ALL
+    /// long-lived operations registered with the container, and two resume passes over
+    /// the same registry start the same operation identity twice — CloudKit throws
+    /// "Long-lived operation <id> attempted to start, but another instance of it is
+    /// already running" on its private container queue (uncaught, SIGABRT — the A4
+    /// crash, observed on 4.36.8 (108) under the QA entitlement override).
+    public func stop() {
+        databaseManager.stopAndCancelOperations()
+    }
+
     /// Fetch data on the CloudKit and merge with local
     ///
     /// - Parameter completionHandler: Supported in the `privateCloudDatabase` when the fetch data process completes, completionHandler will be called. The error will be returned when anything wrong happens. Otherwise the error will be `nil`.
