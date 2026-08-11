@@ -13,8 +13,18 @@
 //
 //  The fix: every operation a DatabaseManager adds is registered here (weakly — completed
 //  operations fall out on their own), and SyncEngine.stop() cancels whatever is still
-//  in flight BEFORE the engine reference is dropped. The next engine's resume pass then
-//  finds nothing running.
+//  in flight BEFORE the engine reference is dropped. After stop(), the registry is
+//  LATCHED: a registration arriving late (a retry backoff firing post-teardown, a setup
+//  callback completing across the stop) is cancelled at registration, so an
+//  alive-but-stopped manager cannot launch new work — the Tier-A review found exactly
+//  those windows open in the latch-less first version.
+//
+//  HONEST LIMIT, stated: what code can guarantee is that in-process operations are
+//  cancelled or refused at registration. That cancellation clears the DAEMON-side
+//  long-lived registration, and that a stop→start cycle faster than the cancellation
+//  round-trip cannot still collide, are CloudKit's semantics — narrowed by this fix,
+//  verified on-device by the entitlement-cycling procedure that produced the crash,
+//  not provable from here.
 //
 
 import CloudKit
@@ -27,21 +37,33 @@ public final class OperationRegistry {
 
     private let lock = NSLock()
     private let operations = NSHashTable<CKOperation>.weakObjects()
+    private var isStopped = false
 
     public init() {}
 
     public func register(_ operation: CKOperation) {
         lock.lock()
         defer { lock.unlock() }
+        // THE LATCH: once stopped, a late registration is cancelled on the spot — the
+        // registration sites all register BEFORE database.add, and adding an
+        // already-cancelled NSOperation finishes it without executing. This is what
+        // closes the post-stop escape paths (retry backoffs, setup callbacks completing
+        // across the stop) that a drain-only cancelAll left open.
+        if isStopped {
+            operation.cancel()
+            return
+        }
         operations.add(operation)
     }
 
-    /// Cancels every tracked operation that is still alive and clears the table.
-    /// Cancelling an already-finished operation is a documented no-op, so this is safe
-    /// to call regardless of how much of the queue has drained.
+    /// Cancels every tracked operation that is still alive, clears the table, and
+    /// LATCHES the registry: registrations arriving after this point are cancelled at
+    /// registration rather than tracked. Cancelling an already-finished operation is a
+    /// documented no-op, so this is safe regardless of how much of the queue has drained.
     public func cancelAll() {
         lock.lock()
         defer { lock.unlock() }
+        isStopped = true
         for operation in operations.allObjects {
             operation.cancel()
         }
