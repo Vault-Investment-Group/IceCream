@@ -49,16 +49,19 @@ public final class SyncEngine {
                 self.databaseManager.startObservingTermination()
                 self.databaseManager.createDatabaseSubscriptionIfHaveNot()
             case .noAccount, .restricted:
-                guard self.databaseManager is PublicDatabaseManager else { break }
+                guard self.databaseManager is PublicDatabaseManager else {
+                    SyncEngine.eventReporter?(.accountUnavailable(status: status, error: error))
+                    break
+                }
                 self.databaseManager.fetchChangesInDatabase(completion)
                 self.databaseManager.resumeLongLivedOperationIfPossible()
                 self.databaseManager.startObservingRemoteChanges()
                 self.databaseManager.startObservingTermination()
                 self.databaseManager.createDatabaseSubscriptionIfHaveNot()
             case .couldNotDetermine:
-                break
+                SyncEngine.eventReporter?(.accountUnavailable(status: status, error: error))
             @unknown default:
-                break
+                SyncEngine.eventReporter?(.accountUnavailable(status: status, error: error))
             }
         }
     }

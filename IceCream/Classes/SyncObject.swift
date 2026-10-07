@@ -100,12 +100,14 @@ extension SyncObject: Syncable {
             
             /// If your model class includes a primary key, you can have Realm intelligently update or add objects based off of their primary key values using Realm().add(_:update:).
             /// https://realm.io/docs/swift/latest/#objects-with-primary-keys
-            realm.beginWrite()
-            realm.add(object, update: .modified)
-            if let token = self.notificationToken {
-                try! realm.commitWrite(withoutNotifying: [token])
-            } else {
-                try! realm.commitWrite()
+            WriteHoldWindow.write("IceCream add") {
+                realm.beginWrite()
+                realm.add(object, update: .modified)
+                if let token = self.notificationToken {
+                    try! realm.commitWrite(withoutNotifying: [token])
+                } else {
+                    try! realm.commitWrite()
+                }
             }
         }
     }
@@ -118,12 +120,14 @@ extension SyncObject: Syncable {
                 return
             }
             CreamAsset.deleteCreamAssetFile(with: recordID.recordName)
-            realm.beginWrite()
-            realm.delete(object)
-            if let token = self.notificationToken {
-                try! realm.commitWrite(withoutNotifying: [token])
-            } else {
-                try! realm.commitWrite()
+            WriteHoldWindow.write("IceCream delete") {
+                realm.beginWrite()
+                realm.delete(object)
+                if let token = self.notificationToken {
+                    try! realm.commitWrite(withoutNotifying: [token])
+                } else {
+                    try! realm.commitWrite()
+                }
             }
         }
     }
@@ -165,12 +169,14 @@ extension SyncObject: Syncable {
             var tokens: [NotificationToken] = []
             self.notificationToken.flatMap { tokens = [$0] }
             
-            realm.beginWrite()
-            objects.forEach({ realm.delete($0) })
-            do {
-                try realm.commitWrite(withoutNotifying: tokens)
-            } catch {
-                
+            WriteHoldWindow.write("IceCream clean up") {
+                realm.beginWrite()
+                objects.forEach({ realm.delete($0) })
+                do {
+                    try realm.commitWrite(withoutNotifying: tokens)
+                } catch {
+                    
+                }
             }
         }
     }
