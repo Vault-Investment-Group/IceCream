@@ -206,6 +206,9 @@ final class PrivateDatabaseManager: DatabaseManager {
         }
         
         operationRegistry.register(changesOp)
+        // A registration after stop() is cancelled on the spot, and an operation that finishes without executing is not
+        // promised to run its completion block, so the window closes here. The close acts once either way.
+        if changesOp.isCancelled { endWriteHold() }
         database.add(changesOp)
     }
 }
