@@ -55,9 +55,11 @@ final class PrivateDatabaseManager: DatabaseManager {
                     self.databaseChangeToken = nil
                     self.fetchChangesInDatabase(callback)
                 default:
+                    if let error = error { SyncEngine.eventReporter?(.databaseFetchFailed(error)) }
                     return
                 }
             default:
+                if let error = error { SyncEngine.eventReporter?(.databaseFetchFailed(error)) }
                 return
             }
         }
@@ -89,6 +91,7 @@ final class PrivateDatabaseManager: DatabaseManager {
                     self.createCustomZonesIfAllowed()
                 })
             default:
+                if let error = error { SyncEngine.eventReporter?(.zoneCreationFailed(error)) }
                 return
             }
         }
@@ -187,11 +190,18 @@ final class PrivateDatabaseManager: DatabaseManager {
             }
         }
         
+        // One write hold for the whole pull: every record's write (each runs synchronously on BackgroundWorker) and the
+        // pending relationships are done when this completion runs, which it does on success, error and cancellation.
+        let endWriteHold = WriteHoldWindow.open("IceCream pull")
         changesOp.fetchRecordZoneChangesCompletionBlock = { [weak self] error in
-            guard let self = self else { return }
+            guard let self = self else {
+                endWriteHold()
+                return
+            }
             self.syncObjects.forEach {
                 $0.resolvePendingRelationships()
             }
+            endWriteHold()
             callback?(error)
         }
         

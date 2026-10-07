@@ -28,8 +28,10 @@ final class PendingRelationshipsWorker<Element: Object> {
             for (primaryKeyValue, (propName, owner)) in self.pendingListElementPrimaryKeyValue {
                 guard let list = owner.value(forKey: propName) as? List<Element> else { return }
                 if let existListElementObject = realm.object(ofType: Element.self, forPrimaryKey: primaryKeyValue) {
-                    try! realm.write {
-                        list.append(existListElementObject)
+                    WriteHoldWindow.write("IceCream relationships") {
+                        try! realm.write {
+                            list.append(existListElementObject)
+                        }
                     }
                     self.pendingListElementPrimaryKeyValue[primaryKeyValue] = nil
                 } else {
