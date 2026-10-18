@@ -20,6 +20,7 @@ final class PrivateDatabaseManager: DatabaseManager {
     
     let syncObjects: [Syncable]
     let operationRegistry = OperationRegistry()
+    let databaseStandIn = SyncEngine.databaseStandIn
     
     public init(objects: [Syncable], container: CKContainer) {
         self.syncObjects = objects
@@ -65,7 +66,7 @@ final class PrivateDatabaseManager: DatabaseManager {
         }
         
         operationRegistry.register(changesOperation)
-        database.add(changesOperation)
+        submit(changesOperation)
     }
     
     func createCustomZonesIfAllowed() {
@@ -97,7 +98,7 @@ final class PrivateDatabaseManager: DatabaseManager {
         }
         
         operationRegistry.register(modifyOp)
-        database.add(modifyOp)
+        submit(modifyOp)
     }
     
     func createDatabaseSubscriptionIfHaveNot() {
@@ -117,7 +118,7 @@ final class PrivateDatabaseManager: DatabaseManager {
         }
         createOp.qualityOfService = .utility
         operationRegistry.register(createOp)
-        database.add(createOp)
+        submit(createOp)
         #endif
     }
     
@@ -209,7 +210,7 @@ final class PrivateDatabaseManager: DatabaseManager {
         // A registration after stop() is cancelled on the spot, and an operation that finishes without executing is not
         // promised to run its completion block, so the window closes here. The close acts once either way.
         if changesOp.isCancelled { endWriteHold() }
-        database.add(changesOp)
+        submit(changesOp)
     }
 }
 

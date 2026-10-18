@@ -43,6 +43,9 @@ protocol DatabaseManager: class {
     /// TV Club fork (tvclub.5): every operation this manager adds is registered here, so
     /// SyncEngine.stop() can cancel what is still in flight before the engine is dropped.
     var operationRegistry: OperationRegistry { get }
+
+    /// TV Club fork (tvclub.8): `SyncEngine.databaseStandIn` as it was when this manager was made. Nil in the app.
+    var databaseStandIn: DatabaseStandIn? { get }
 }
 
 extension DatabaseManager {
@@ -64,7 +67,17 @@ extension DatabaseManager {
         operationRegistry.cancelAll()
     }
 
+    /// TV Club fork (tvclub.8): adds `operation` to the database, or hands it to the stand-in when there is one.
+    func submit(_ operation: CKDatabaseOperation) {
+        if let standIn = databaseStandIn {
+            standIn.add(operation)
+        } else {
+            database.add(operation)
+        }
+    }
+
     func resumeLongLivedOperationIfPossible() {
+        guard databaseStandIn == nil else { return }
         container.fetchAllLongLivedOperationIDs { [weak self]( opeIDs, error) in
             guard let self = self, error == nil, let ids = opeIDs else { return }
             for id in ids {
@@ -151,7 +164,7 @@ extension DatabaseManager {
         }
         
         operationRegistry.register(modifyOpe)
-        database.add(modifyOpe)
+        submit(modifyOpe)
     }
     
 }

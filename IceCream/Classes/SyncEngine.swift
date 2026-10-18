@@ -37,7 +37,13 @@ public final class SyncEngine {
     
     private func setup(completion: ((Error?) -> Void)?) {
         databaseManager.prepare()
-        databaseManager.container.accountStatus { [weak self] (status, error) in
+        let checkAccountStatus: (@escaping (CKAccountStatus, Error?) -> Void) -> Void
+        if let standIn = databaseManager.databaseStandIn {
+            checkAccountStatus = standIn.accountStatus
+        } else {
+            checkAccountStatus = databaseManager.container.accountStatus(completionHandler:)
+        }
+        checkAccountStatus { [weak self] (status, error) in
             guard let self = self else { return }
             switch status {
             case .available:
