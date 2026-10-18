@@ -28,6 +28,18 @@ extension SyncEngine {
     /// and returns the call that ends it. IceCream calls it once per pull, or once per write outside a pull. Nil by
     /// default: nothing is held.
     public static var writeHold: ((String) -> () -> Void)?
+
+    /// Optional, for tests. An engine created while this is set keeps it and uses it in place of CloudKit: it asks it for
+    /// the account status, hands it every operation it would add to the database, and resumes no long-lived operations.
+    /// Nil by default: engines use CloudKit.
+    public static var databaseStandIn: DatabaseStandIn?
+}
+
+/// Stands in for CloudKit's database (`SyncEngine.databaseStandIn`). It completes the operations it is given, or not, as
+/// the test needs.
+public protocol DatabaseStandIn: AnyObject {
+    func accountStatus(_ completion: @escaping (CKAccountStatus, Error?) -> Void)
+    func add(_ operation: CKDatabaseOperation)
 }
 
 /// `SyncEngine.writeHold` across IceCream's Realm writes: one hold for a whole pull, and one per write made outside a pull.

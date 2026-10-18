@@ -20,6 +20,7 @@ final class PublicDatabaseManager: DatabaseManager {
     
     let syncObjects: [Syncable]
     let operationRegistry = OperationRegistry()
+    let databaseStandIn = SyncEngine.databaseStandIn
     
     init(objects: [Syncable], container: CKContainer) {
         self.syncObjects = objects
@@ -92,7 +93,7 @@ final class PublicDatabaseManager: DatabaseManager {
         }
         
         operationRegistry.register(queryOperation)
-        database.add(queryOperation)
+        submit(queryOperation)
     }
     
     private func createSubscriptionInPublicDatabase(on syncObject: Syncable) {
@@ -111,7 +112,7 @@ final class PublicDatabaseManager: DatabaseManager {
         }
         createOp.qualityOfService = .utility
         operationRegistry.register(createOp)
-        database.add(createOp)
+        submit(createOp)
         #endif
     }
     
