@@ -70,7 +70,10 @@ final class PrivateDatabaseManager: DatabaseManager {
     }
     
     func createCustomZonesIfAllowed() {
-        let zonesToCreate = syncObjects.filter { !$0.isCustomZoneCreated }.map { CKRecordZone(zoneID: $0.zoneID) }
+        // TV Club fork (tvclub.9): only the objects whose zones this operation creates are marked and pushed below, so
+        // adding a type to an engine whose other zones exist pushes that type's rows alone, not every type's library.
+        let objectsToCreate = syncObjects.filter { !$0.isCustomZoneCreated }
+        let zonesToCreate = objectsToCreate.map { CKRecordZone(zoneID: $0.zoneID) }
         guard zonesToCreate.count > 0 else { return }
         
         let modifyOp = CKModifyRecordZonesOperation(recordZonesToSave: zonesToCreate, recordZoneIDsToDelete: nil)
@@ -78,7 +81,7 @@ final class PrivateDatabaseManager: DatabaseManager {
             guard let self = self else { return }
             switch ErrorHandler.shared.resultType(with: error) {
             case .success:
-                self.syncObjects.forEach { object in
+                objectsToCreate.forEach { object in
                     object.isCustomZoneCreated = true
                     
                     // As we register local database in the first step, we have to force push local objects which
