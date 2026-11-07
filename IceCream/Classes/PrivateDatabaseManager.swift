@@ -29,6 +29,12 @@ final class PrivateDatabaseManager: DatabaseManager {
     }
     
     func fetchChangesInDatabase(_ callback: ((Error?) -> Void)?) {
+        fetchChangesInDatabase(pull: PullCallback(callback))
+    }
+    
+    /// TV Club fork (tvclub.10): every path calls `pull` back, once. A retry is reported and counts toward the pull's wait
+    /// limit; an error that isn't retried is reported and called back.
+    private func fetchChangesInDatabase(pull: PullCallback) {
         let changesOperation = CKFetchDatabaseChangesOperation(previousServerChangeToken: databaseChangeToken)
         
         /// Only update the changeToken when fetch process completes
@@ -39,34 +45,55 @@ final class PrivateDatabaseManager: DatabaseManager {
         changesOperation.fetchDatabaseChangesCompletionBlock = {
             [weak self]
             newToken, _, error in
-            guard let self = self else { return }
+            // The manager is gone, so the engine was torn down: a cancellation, whatever the operation's own error.
+            guard let self = self else {
+                pull.finish(CKError(.operationCancelled))
+                return
+            }
             switch ErrorHandler.shared.resultType(with: error) {
             case .success:
                 self.databaseChangeToken = newToken
                 // Fetch the changes in zone level
-                self.fetchChangesInZones(callback)
+                self.fetchChangesInZones(pull)
             case .retry(let timeToWait, _):
-                ErrorHandler.shared.retryOperationIfPossible(retryAfter: timeToWait, block: {
-                    self.fetchChangesInDatabase(callback)
-                })
+                self.retry(after: timeToWait, error: error, pull: pull, beforeZones: true) {
+                    self.fetchChangesInDatabase(pull: pull)
+                }
             case .recoverableError(let reason, _):
                 switch reason {
                 case .changeTokenExpired:
                     /// The previousServerChangeToken value is too old and the client must re-sync from scratch
                     self.databaseChangeToken = nil
-                    self.fetchChangesInDatabase(callback)
+                    self.fetchChangesInDatabase(pull: pull)
                 default:
                     if let error = error { SyncEngine.eventReporter?(.databaseFetchFailed(error)) }
-                    return
+                    pull.finish(SyncEngine.markedBeforeZones(error))
                 }
             default:
                 if let error = error { SyncEngine.eventReporter?(.databaseFetchFailed(error)) }
-                return
+                pull.finish(SyncEngine.markedBeforeZones(error))
             }
         }
         
         operationRegistry.register(changesOperation)
+        // A registration after stop() is cancelled on the spot, and an operation that finishes without executing is not
+        // promised to run its completion block, so the pull calls back here. It calls back once either way.
+        if changesOperation.isCancelled { pull.finish(CKError(.operationCancelled)) }
         submit(changesOperation)
+        // And a stop() between the check and the submit.
+        if changesOperation.isCancelled { pull.finish(CKError(.operationCancelled)) }
+    }
+    
+    /// TV Club fork (tvclub.10): reports the retry and schedules it, or, when its wait would take the pull's total past
+    /// `SyncEngine.retryWaitLimit`, calls the pull back with `error` and doesn't retry. A database-level give-up is marked
+    /// as one (`SyncEngine.failedBeforeZones`).
+    private func retry(after wait: Double, error: Error?, pull: PullCallback, beforeZones: Bool = false, _ block: @escaping () -> Void) {
+        guard pull.addWait(wait) else {
+            pull.finish(beforeZones ? SyncEngine.markedBeforeZones(error) : error)
+            return
+        }
+        if let error = error { SyncEngine.eventReporter?(.retryScheduled(error, wait: wait)) }
+        ErrorHandler.shared.retryOperationIfPossible(retryAfter: wait, block: block)
     }
     
     func createCustomZonesIfAllowed() {
@@ -145,9 +172,13 @@ final class PrivateDatabaseManager: DatabaseManager {
         }
     }
     
-    private func fetchChangesInZones(_ callback: ((Error?) -> Void)? = nil) {
+    /// TV Club fork (tvclub.10): a zone's retry or token reset doesn't fetch again from inside this operation, whose own
+    /// completion would call back too. The operation's completion fetches again once, after the longest wait asked for, or
+    /// calls `pull` back.
+    private func fetchChangesInZones(_ pull: PullCallback) {
         let changesOp = CKFetchRecordZoneChangesOperation(recordZoneIDs: zoneIds, optionsByRecordZoneID: zoneIdOptions)
         changesOp.fetchAllChanges = true
+        let fetchAgain = ZoneFetchAgain()
         
         changesOp.recordZoneChangeTokensUpdatedBlock = { [weak self] zoneId, token, _ in
             guard let self = self else { return }
@@ -176,16 +207,14 @@ final class PrivateDatabaseManager: DatabaseManager {
                 guard let syncObject = self.syncObjects.first(where: { $0.zoneID == zoneId }) else { return }
                 syncObject.zoneChangesToken = token
             case .retry(let timeToWait, _):
-                ErrorHandler.shared.retryOperationIfPossible(retryAfter: timeToWait, block: {
-                    self.fetchChangesInZones(callback)
-                })
+                fetchAgain.retry(after: timeToWait, error: error)
             case .recoverableError(let reason, _):
                 switch reason {
                 case .changeTokenExpired:
                     /// The previousServerChangeToken value is too old and the client must re-sync from scratch
                     guard let syncObject = self.syncObjects.first(where: { $0.zoneID == zoneId }) else { return }
                     syncObject.zoneChangesToken = nil
-                    self.fetchChangesInZones(callback)
+                    fetchAgain.now()
                 default:
                     return
                 }
@@ -200,20 +229,106 @@ final class PrivateDatabaseManager: DatabaseManager {
         changesOp.fetchRecordZoneChangesCompletionBlock = { [weak self] error in
             guard let self = self else {
                 endWriteHold()
+                pull.finish(CKError(.operationCancelled))
                 return
             }
             self.syncObjects.forEach {
                 $0.resolvePendingRelationships()
             }
             endWriteHold()
-            callback?(error)
+            // Cancelled (stop()): no zone fetches again.
+            if let ckError = error as? CKError, ckError.code == .operationCancelled {
+                pull.finish(error)
+                return
+            }
+            switch fetchAgain.asked {
+            case .none:
+                pull.finish(error)
+            case .now:
+                self.fetchChangesInZones(pull)
+            case let .after(wait, retryError):
+                self.retry(after: wait, error: retryError, pull: pull) {
+                    self.fetchChangesInZones(pull)
+                }
+            }
         }
         
         operationRegistry.register(changesOp)
         // A registration after stop() is cancelled on the spot, and an operation that finishes without executing is not
-        // promised to run its completion block, so the window closes here. The close acts once either way.
-        if changesOp.isCancelled { endWriteHold() }
+        // promised to run its completion block, so the window closes here. The close acts once either way, and so does
+        // the pull's callback.
+        if changesOp.isCancelled {
+            endWriteHold()
+            pull.finish(CKError(.operationCancelled))
+        }
         submit(changesOp)
+        // And a stop() between the check and the submit. The window stays for the completion: records may still be
+        // applying.
+        if changesOp.isCancelled { pull.finish(CKError(.operationCancelled)) }
+    }
+}
+
+/// TV Club fork (tvclub.10): one pull's callback, called once whatever the path, and the total its retries have waited.
+final class PullCallback {
+    private let lock = NSLock()
+    private var callback: ((Error?) -> Void)?
+    private var finished = false
+    private var waited: Double = 0
+    
+    init(_ callback: ((Error?) -> Void)?) {
+        self.callback = callback
+    }
+    
+    /// Calls back with `error` the first time, and does nothing after.
+    func finish(_ error: Error?) {
+        lock.lock()
+        let pending = finished ? nil : callback
+        finished = true
+        callback = nil
+        lock.unlock()
+        pending?(error)
+    }
+    
+    /// Adds a retry's wait to the pull's total, unless it would take the total past `SyncEngine.retryWaitLimit`: then it
+    /// adds nothing and returns false.
+    func addWait(_ wait: Double) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard waited + wait <= SyncEngine.retryWaitLimit else { return false }
+        waited += wait
+        return true
+    }
+}
+
+/// TV Club fork (tvclub.10): what one zone-changes operation's zones asked for: nothing, to fetch again at once (a token
+/// reset), or to fetch again after a wait (a retry; the longest wait asked for, with its error).
+final class ZoneFetchAgain {
+    enum Ask {
+        case none
+        case now
+        case after(Double, Error?)
+    }
+    
+    private let lock = NSLock()
+    private var ask = Ask.none
+    
+    var asked: Ask {
+        lock.lock()
+        defer { lock.unlock() }
+        return ask
+    }
+    
+    func now() {
+        lock.lock()
+        defer { lock.unlock() }
+        if case .none = ask { ask = .now }
+    }
+    
+    func retry(after wait: Double, error: Error?) {
+        lock.lock()
+        defer { lock.unlock() }
+        if case let .after(longest, _) = ask, longest >= wait { return }
+        ask = .after(wait, error)
     }
 }
 
