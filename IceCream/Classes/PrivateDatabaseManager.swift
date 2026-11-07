@@ -45,8 +45,9 @@ final class PrivateDatabaseManager: DatabaseManager {
         changesOperation.fetchDatabaseChangesCompletionBlock = {
             [weak self]
             newToken, _, error in
+            // The manager is gone, so the engine was torn down: a cancellation, whatever the operation's own error.
             guard let self = self else {
-                pull.finish(error ?? CKError(.operationCancelled))
+                pull.finish(CKError(.operationCancelled))
                 return
             }
             switch ErrorHandler.shared.resultType(with: error) {
@@ -55,7 +56,7 @@ final class PrivateDatabaseManager: DatabaseManager {
                 // Fetch the changes in zone level
                 self.fetchChangesInZones(pull)
             case .retry(let timeToWait, _):
-                self.retry(after: timeToWait, error: error, pull: pull) {
+                self.retry(after: timeToWait, error: error, pull: pull, beforeZones: true) {
                     self.fetchChangesInDatabase(pull: pull)
                 }
             case .recoverableError(let reason, _):
@@ -66,11 +67,11 @@ final class PrivateDatabaseManager: DatabaseManager {
                     self.fetchChangesInDatabase(pull: pull)
                 default:
                     if let error = error { SyncEngine.eventReporter?(.databaseFetchFailed(error)) }
-                    pull.finish(error)
+                    pull.finish(SyncEngine.markedBeforeZones(error))
                 }
             default:
                 if let error = error { SyncEngine.eventReporter?(.databaseFetchFailed(error)) }
-                pull.finish(error)
+                pull.finish(SyncEngine.markedBeforeZones(error))
             }
         }
         
@@ -79,13 +80,16 @@ final class PrivateDatabaseManager: DatabaseManager {
         // promised to run its completion block, so the pull calls back here. It calls back once either way.
         if changesOperation.isCancelled { pull.finish(CKError(.operationCancelled)) }
         submit(changesOperation)
+        // And a stop() between the check and the submit.
+        if changesOperation.isCancelled { pull.finish(CKError(.operationCancelled)) }
     }
     
     /// TV Club fork (tvclub.10): reports the retry and schedules it, or, when its wait would take the pull's total past
-    /// `SyncEngine.retryWaitLimit`, calls the pull back with `error` and doesn't retry.
-    private func retry(after wait: Double, error: Error?, pull: PullCallback, _ block: @escaping () -> Void) {
+    /// `SyncEngine.retryWaitLimit`, calls the pull back with `error` and doesn't retry. A database-level give-up is marked
+    /// as one (`SyncEngine.failedBeforeZones`).
+    private func retry(after wait: Double, error: Error?, pull: PullCallback, beforeZones: Bool = false, _ block: @escaping () -> Void) {
         guard pull.addWait(wait) else {
-            pull.finish(error)
+            pull.finish(beforeZones ? SyncEngine.markedBeforeZones(error) : error)
             return
         }
         if let error = error { SyncEngine.eventReporter?(.retryScheduled(error, wait: wait)) }
@@ -225,13 +229,18 @@ final class PrivateDatabaseManager: DatabaseManager {
         changesOp.fetchRecordZoneChangesCompletionBlock = { [weak self] error in
             guard let self = self else {
                 endWriteHold()
-                pull.finish(error ?? CKError(.operationCancelled))
+                pull.finish(CKError(.operationCancelled))
                 return
             }
             self.syncObjects.forEach {
                 $0.resolvePendingRelationships()
             }
             endWriteHold()
+            // Cancelled (stop()): no zone fetches again.
+            if let ckError = error as? CKError, ckError.code == .operationCancelled {
+                pull.finish(error)
+                return
+            }
             switch fetchAgain.asked {
             case .none:
                 pull.finish(error)
@@ -253,6 +262,9 @@ final class PrivateDatabaseManager: DatabaseManager {
             pull.finish(CKError(.operationCancelled))
         }
         submit(changesOp)
+        // And a stop() between the check and the submit. The window stays for the completion: records may still be
+        // applying.
+        if changesOp.isCancelled { pull.finish(CKError(.operationCancelled)) }
     }
 }
 

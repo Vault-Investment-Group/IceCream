@@ -41,6 +41,28 @@ extension SyncEngine {
     /// TV Club fork (tvclub.10): the most one pull's retries wait in all, in seconds. A retry whose wait would take the
     /// pull's total past it isn't made: the pull calls back with that retry's error. Ten minutes; tests set less.
     public static var retryWaitLimit: Double = 600
+
+    /// TV Club fork (tvclub.10): true for a pull's error from the database level, before any zone was fetched: an error
+    /// that wasn't retried, or a retry past the wait limit. Until tvclub.10 those never called back, so a caller whose
+    /// work assumes a pull ran (an engine's start completion) can tell them apart. The error keeps its domain and code.
+    public static func failedBeforeZones(_ error: Error?) -> Bool {
+        guard let error = error else { return false }
+        return (error as NSError).userInfo[beforeZonesKey] as? Bool == true
+    }
+
+    static let beforeZonesKey = "IceCreamPullFailedBeforeZones"
+
+    /// `error`, with the same domain and code, marked as failed before the zones (`failedBeforeZones`).
+    static func markedBeforeZones(_ error: Error?) -> Error? {
+        guard let error = error else { return nil }
+        let nsError = error as NSError
+        var userInfo = nsError.userInfo
+        userInfo[beforeZonesKey] = true
+        if nsError.domain == CKErrorDomain {
+            return CKError(CKError.Code(rawValue: nsError.code) ?? .internalError, userInfo: userInfo)
+        }
+        return NSError(domain: nsError.domain, code: nsError.code, userInfo: userInfo)
+    }
 }
 
 /// Stands in for CloudKit's database (`SyncEngine.databaseStandIn`). It completes the operations it is given, or not, as
