@@ -6,7 +6,8 @@
 import CloudKit
 import Foundation
 
-/// Something the engine could not do and does not retry, or the result of a pull no caller is waiting for.
+/// Something the engine could not do and does not retry, a retry it scheduled, or the result of a pull no caller is
+/// waiting for.
 public enum SyncEvent {
     /// A push to CloudKit failed.
     case pushFailed(Error)
@@ -18,6 +19,9 @@ public enum SyncEvent {
     case zoneCreationFailed(Error)
     /// A pull started by a remote-change notification finished: nil when the zone fetch completed, or its error.
     case remotePullCompleted(Error?)
+    /// TV Club fork (tvclub.10): a pull will fetch again after `wait` seconds, as CloudKit's `error` asked, at the
+    /// database or the zone level.
+    case retryScheduled(Error, wait: Double)
 }
 
 extension SyncEngine {
@@ -33,6 +37,10 @@ extension SyncEngine {
     /// the account status, hands it every operation it would add to the database, and resumes no long-lived operations.
     /// Nil by default: engines use CloudKit.
     public static var databaseStandIn: DatabaseStandIn?
+
+    /// TV Club fork (tvclub.10): the most one pull's retries wait in all, in seconds. A retry whose wait would take the
+    /// pull's total past it isn't made: the pull calls back with that retry's error. Ten minutes; tests set less.
+    public static var retryWaitLimit: Double = 600
 }
 
 /// Stands in for CloudKit's database (`SyncEngine.databaseStandIn`). It completes the operations it is given, or not, as
