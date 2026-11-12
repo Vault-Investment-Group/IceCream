@@ -22,9 +22,11 @@ final class PrivateDatabaseManager: DatabaseManager {
     let operationRegistry = OperationRegistry()
     let databaseStandIn = SyncEngine.databaseStandIn
     
-    /// TV Club fork (tvclub.11): the pull in flight, or the last one. A request while it's in flight joins it.
+    /// TV Club fork (tvclub.11): the pull in flight, or the last one, and the one that follows it: the requests that
+    /// came after it reached the zones, answered by one more pull when it ends.
     private let pullLock = NSLock()
     private var currentPull: PullCallback?
+    private var followingPull: PullCallback?
     
     public init(objects: [Syncable], container: CKContainer) {
         self.syncObjects = objects
@@ -32,25 +34,65 @@ final class PrivateDatabaseManager: DatabaseManager {
         self.database = container.privateCloudDatabase
     }
     
-    /// TV Club fork (tvclub.11): one pull at a time. A request while a pull is in flight (the start's, a remote change's,
-    /// the app's) joins it and is called back with its result, once. Otherwise it starts a pull, which ends by
-    /// `SyncEngine.pullTimeLimit` on the wall clock: when the limit passes first, the pull cancels its operations, applies
-    /// nothing more, and calls back with `SyncEngine.pullTimedOut`'s error.
+    /// TV Club fork (tvclub.11): one pull at a time. A request while a pull is in flight joins it while it hasn't reached
+    /// the zones, whose fetch, made later, brings what the request was for. One that comes later, when the zones' fetch
+    /// may have passed what it was for, is answered by one more pull that starts when this one ends, and every request
+    /// that comes in the meantime joins that one. Each request is called back once, with the result of the pull that
+    /// answers it. A pull ends by `SyncEngine.pullTimeLimit` on the wall clock: when the limit passes first, the pull
+    /// cancels its operations, applies no further batch, and calls back with `SyncEngine.pullTimedOut`'s error.
     func fetchChangesInDatabase(_ callback: ((Error?) -> Void)?) {
         pullLock.lock()
-        if let current = currentPull, current.join(callback) {
+        if let following = followingPull {
+            _ = following.join(callback)
+            pullLock.unlock()
+            return
+        }
+        if let current = currentPull, current.joinBeforeZones(callback) {
+            pullLock.unlock()
+            return
+        }
+        if let current = currentPull, !current.isFinished {
+            let following = PullCallback(callback)
+            followingPull = following
             pullLock.unlock()
             return
         }
         let pull = PullCallback(callback)
         currentPull = pull
         pullLock.unlock()
+        begin(pull)
+    }
+    
+    /// Starts `pull`: its time limit, then its fetch. When it ends, the pull that follows it starts.
+    private func begin(_ pull: PullCallback) {
+        pull.whenFinished { [weak self, weak pull] in
+            guard let self = self, let pull = pull else { return }
+            self.pullEnded(pull)
+        }
         let limit = SyncEngine.pullTimeLimit
-        DispatchQueue.global(qos: .utility).asyncAfter(wallDeadline: .now() + limit) { [weak pull] in
-            guard let pull = pull, pull.timeOut() else { return }
+        DispatchQueue.global(qos: .utility).asyncAfter(wallDeadline: .now() + limit) { [weak self, weak pull] in
+            guard let pull = pull else { return }
+            // A stopped engine's pull ends as a cancellation, as stop() ends its operations, not as a time limit.
+            guard let self = self, !self.operationRegistry.isStopped else {
+                pull.cancelOperations(ending: CKError(.operationCancelled))
+                return
+            }
+            guard pull.timeOut() else { return }
             SyncEngine.eventReporter?(.pullTimedOut(seconds: limit))
         }
         fetchChangesInDatabase(pull: pull)
+    }
+    
+    private func pullEnded(_ pull: PullCallback) {
+        pullLock.lock()
+        guard currentPull === pull, let following = followingPull else {
+            pullLock.unlock()
+            return
+        }
+        followingPull = nil
+        currentPull = following
+        pullLock.unlock()
+        begin(following)
     }
     
     /// TV Club fork (tvclub.10): every path calls `pull` back, once. A retry is reported and counts toward the pull's wait
@@ -329,6 +371,7 @@ final class PullCallback {
     private var finished = false
     private var waited: Double = 0
     private var zonesReached = false
+    private var ended: (() -> Void)?
     private let operations = NSHashTable<CKOperation>.weakObjects()
     
     init(_ callback: ((Error?) -> Void)?) {
@@ -342,7 +385,7 @@ final class PullCallback {
         return finished
     }
     
-    /// Adds `callback` to the pull in flight and returns true, or returns false when the pull has called back.
+    /// Adds `callback` and returns true, or returns false when the pull has called back.
     func join(_ callback: ((Error?) -> Void)?) -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -351,14 +394,47 @@ final class PullCallback {
         return true
     }
     
+    /// Adds `callback` and returns true while the pull hasn't called back nor reached the zones; otherwise returns false.
+    func joinBeforeZones(_ callback: ((Error?) -> Void)?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished, !zonesReached else { return false }
+        if let callback = callback { callbacks.append(callback) }
+        return true
+    }
+    
+    /// Runs `block` once the pull has called everyone back.
+    func whenFinished(_ block: @escaping () -> Void) {
+        lock.lock()
+        ended = block
+        lock.unlock()
+    }
+    
     /// Calls everyone back with `error` the first time, and does nothing after.
     func finish(_ error: Error?) {
+        _ = end(error, cancelling: false)
+    }
+    
+    /// Ends the pull, under the lock, so nothing joins it or is tracked by it after; then calls everyone back with
+    /// `error`, cancels its operations when asked, and runs its end. Returns false when it had already ended.
+    private func end(_ error: Error?, cancelling: Bool) -> Bool {
         lock.lock()
-        let pending = finished ? [] : callbacks
+        guard !finished else {
+            lock.unlock()
+            return false
+        }
         finished = true
+        let pending = callbacks
         callbacks = []
+        let running = cancelling ? operations.allObjects : []
+        operations.removeAllObjects()
+        let block = ended
+        ended = nil
         lock.unlock()
         pending.forEach { $0(error) }
+        running.forEach { $0.cancel() }
+        block?()
+        return true
     }
     
     /// Adds a retry's wait to the pull's total, unless it would take the total past `SyncEngine.retryWaitLimit`: then it
@@ -391,17 +467,14 @@ final class PullCallback {
     /// operations, and returns true.
     func timeOut() -> Bool {
         lock.lock()
-        guard !finished else {
-            lock.unlock()
-            return false
-        }
         let beforeZones = !zonesReached
-        let running = operations.allObjects
-        operations.removeAllObjects()
         lock.unlock()
-        finish(SyncEngine.timedOutError(beforeZones: beforeZones))
-        running.forEach { $0.cancel() }
-        return true
+        return end(SyncEngine.timedOutError(beforeZones: beforeZones), cancelling: true)
+    }
+    
+    /// Ends the pull with `error` when it hasn't called back, and cancels its operations.
+    func cancelOperations(ending error: Error) {
+        _ = end(error, cancelling: true)
     }
 }
 

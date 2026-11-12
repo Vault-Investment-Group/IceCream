@@ -48,14 +48,15 @@ extension SyncEngine {
     public static var retryWaitLimit: Double = 600
 
     /// TV Club fork (tvclub.11): the longest one pull runs, in seconds on the wall clock, so time the app spends suspended
-    /// counts. When it passes, the pull cancels its operations, applies nothing more, and calls back with an error that
-    /// `pullTimedOut` recognises. Twelve minutes: past `retryWaitLimit`, so the retries it allows can run, and short of the
+    /// counts. When it passes, the pull cancels its operations, applies no further batch (one already being written
+    /// finishes, with its token), and calls back with an error that `pullTimedOut` recognises. A stopped engine's pull
+    /// ends as a plain cancellation instead. Twelve minutes: past `retryWaitLimit`, so the retries it allows can run, and short of the
     /// app's own fifteen-minute give-up. Tests set less. A pull's limit is the one set when it started.
     public static var pullTimeLimit: Double = 720
 
-    /// TV Club fork (tvclub.11): true for the error a pull calls back with when it reached `pullTimeLimit`. It's a
-    /// cancellation (`CKError.operationCancelled`), so a caller that already treats a cancelled pull as one that didn't run
-    /// treats this one the same; it's marked `failedBeforeZones` too when it ended before the zones.
+    /// TV Club fork (tvclub.11): true for the error a live engine's pull calls back with when it reached `pullTimeLimit`.
+    /// It's a `CKError.operationCancelled`, so check this before reading a cancellation as a stopped engine; it's marked
+    /// `failedBeforeZones` too when it ended before the zones.
     public static func pullTimedOut(_ error: Error?) -> Bool {
         guard let error = error else { return false }
         return (error as NSError).userInfo[timedOutKey] as? Bool == true

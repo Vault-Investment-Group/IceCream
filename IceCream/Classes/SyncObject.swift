@@ -150,6 +150,10 @@ extension SyncObject: Syncable {
             self.pendingUTypeRelationshipsWorker.realm = realm
             self.pendingVTypeRelationshipsWorker.realm = realm
             self.pendingWTypeRelationshipsWorker.realm = realm
+            // The relationships this batch leaves pending name its own objects; a write that fails leaves them out.
+            let pendingU = self.pendingUTypeRelationshipsWorker.pendingListElementPrimaryKeyValue
+            let pendingV = self.pendingVTypeRelationshipsWorker.pendingListElementPrimaryKeyValue
+            let pendingW = self.pendingWTypeRelationshipsWorker.pendingListElementPrimaryKeyValue
             var deletedRecordNames: [String] = []
             WriteHoldWindow.write("IceCream batch") {
                 realm.beginWrite()
@@ -186,6 +190,9 @@ extension SyncObject: Syncable {
                     if realm.isInWriteTransaction { realm.cancelWrite() }
                     failure = error
                     deletedRecordNames = []
+                    self.pendingUTypeRelationshipsWorker.pendingListElementPrimaryKeyValue = pendingU
+                    self.pendingVTypeRelationshipsWorker.pendingListElementPrimaryKeyValue = pendingV
+                    self.pendingWTypeRelationshipsWorker.pendingListElementPrimaryKeyValue = pendingW
                 }
             }
             deletedRecordNames.forEach { CreamAsset.deleteCreamAssetFile(with: $0) }
