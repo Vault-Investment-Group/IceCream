@@ -132,6 +132,74 @@ extension SyncObject: Syncable {
         }
     }
     
+    /// TV Club fork (tvclub.11): one CloudKit batch in one Realm write, on the background worker: every record added or
+    /// updated and every deletion, in the order the pull brought them. A commit that fails is cancelled and thrown, so
+    /// nothing of the batch is written; a record that doesn't convert is skipped, as `add(record:)` skips it. A deleted
+    /// record's asset files go only once the write has committed.
+    public func apply(_ changes: [PulledChange]) throws {
+        guard !changes.isEmpty else { return }
+        var failure: Error?
+        BackgroundWorker.shared.start {
+            let realm: Realm
+            do {
+                realm = try Realm(configuration: self.realmConfiguration)
+            } catch {
+                failure = error
+                return
+            }
+            self.pendingUTypeRelationshipsWorker.realm = realm
+            self.pendingVTypeRelationshipsWorker.realm = realm
+            self.pendingWTypeRelationshipsWorker.realm = realm
+            // The relationships this batch leaves pending name its own objects; a write that fails leaves them out.
+            let pendingU = self.pendingUTypeRelationshipsWorker.pendingListElementPrimaryKeyValue
+            let pendingV = self.pendingVTypeRelationshipsWorker.pendingListElementPrimaryKeyValue
+            let pendingW = self.pendingWTypeRelationshipsWorker.pendingListElementPrimaryKeyValue
+            var deletedRecordNames: [String] = []
+            WriteHoldWindow.write("IceCream batch") {
+                realm.beginWrite()
+                for change in changes {
+                    switch change {
+                    case let .changed(record):
+                        guard let object = T.parseFromRecord(
+                            record: record,
+                            realm: realm,
+                            notificationToken: self.notificationToken,
+                            pendingUTypeRelationshipsWorker: self.pendingUTypeRelationshipsWorker,
+                            pendingVTypeRelationshipsWorker: self.pendingVTypeRelationshipsWorker,
+                            pendingWTypeRelationshipsWorker: self.pendingWTypeRelationshipsWorker
+                        ) else {
+                            print("There is something wrong with the converson from cloud record to local object")
+                            continue
+                        }
+                        realm.add(object, update: .modified)
+                    case let .deleted(recordID):
+                        guard let object = realm.object(ofType: T.self, forPrimaryKey: T.primaryKeyForRecordID(recordID: recordID)) else {
+                            continue
+                        }
+                        realm.delete(object)
+                        deletedRecordNames.append(recordID.recordName)
+                    }
+                }
+                do {
+                    if let token = self.notificationToken {
+                        try realm.commitWrite(withoutNotifying: [token])
+                    } else {
+                        try realm.commitWrite()
+                    }
+                } catch {
+                    if realm.isInWriteTransaction { realm.cancelWrite() }
+                    failure = error
+                    deletedRecordNames = []
+                    self.pendingUTypeRelationshipsWorker.pendingListElementPrimaryKeyValue = pendingU
+                    self.pendingVTypeRelationshipsWorker.pendingListElementPrimaryKeyValue = pendingV
+                    self.pendingWTypeRelationshipsWorker.pendingListElementPrimaryKeyValue = pendingW
+                }
+            }
+            deletedRecordNames.forEach { CreamAsset.deleteCreamAssetFile(with: $0) }
+        }
+        if let failure = failure { throw failure }
+    }
+    
     /// When you commit a write transaction to a Realm, all other instances of that Realm will be notified, and be updated automatically.
     /// For more: https://realm.io/docs/swift/latest/#writes
     public func registerLocalDatabase() {

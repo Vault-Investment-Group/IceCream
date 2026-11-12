@@ -37,7 +37,7 @@ public final class OperationRegistry {
 
     private let lock = NSLock()
     private let operations = NSHashTable<CKOperation>.weakObjects()
-    private var isStopped = false
+    private var stopped = false
 
     public init() {}
 
@@ -49,7 +49,7 @@ public final class OperationRegistry {
         // already-cancelled NSOperation finishes it without executing. This is what
         // closes the post-stop escape paths (retry backoffs, setup callbacks completing
         // across the stop) that a drain-only cancelAll left open.
-        if isStopped {
+        if stopped {
             operation.cancel()
             return
         }
@@ -63,11 +63,19 @@ public final class OperationRegistry {
     public func cancelAll() {
         lock.lock()
         defer { lock.unlock() }
-        isStopped = true
+        stopped = true
         for operation in operations.allObjects {
             operation.cancel()
         }
         operations.removeAllObjects()
+    }
+
+    /// TV Club fork (tvclub.11): whether `cancelAll()` has run, so a pull's time limit ends a stopped engine's pull as a
+    /// cancellation.
+    public var isStopped: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopped
     }
 
     /// The number of still-alive tracked operations (weak table: finished operations
