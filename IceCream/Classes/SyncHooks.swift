@@ -22,6 +22,11 @@ public enum SyncEvent {
     /// TV Club fork (tvclub.10): a pull will fetch again after `wait` seconds, as CloudKit's `error` asked, at the
     /// database or the zone level.
     case retryScheduled(Error, wait: Double)
+    /// TV Club fork (tvclub.11): a pull reached its time limit, `SyncEngine.pullTimeLimit` seconds, and was cancelled.
+    case pullTimedOut(seconds: Double)
+    /// TV Club fork (tvclub.11): a pulled batch couldn't be written to Realm. Nothing of it was written, its zone's token
+    /// didn't move, and the pull called back with `error`.
+    case batchApplyFailed(Error)
 }
 
 extension SyncEngine {
@@ -41,6 +46,28 @@ extension SyncEngine {
     /// TV Club fork (tvclub.10): the most one pull's retries wait in all, in seconds. A retry whose wait would take the
     /// pull's total past it isn't made: the pull calls back with that retry's error. Ten minutes; tests set less.
     public static var retryWaitLimit: Double = 600
+
+    /// TV Club fork (tvclub.11): the longest one pull runs, in seconds on the wall clock, so time the app spends suspended
+    /// counts. When it passes, the pull cancels its operations, applies nothing more, and calls back with an error that
+    /// `pullTimedOut` recognises. Twelve minutes: past `retryWaitLimit`, so the retries it allows can run, and short of the
+    /// app's own fifteen-minute give-up. Tests set less. A pull's limit is the one set when it started.
+    public static var pullTimeLimit: Double = 720
+
+    /// TV Club fork (tvclub.11): true for the error a pull calls back with when it reached `pullTimeLimit`. It's a
+    /// cancellation (`CKError.operationCancelled`), so a caller that already treats a cancelled pull as one that didn't run
+    /// treats this one the same; it's marked `failedBeforeZones` too when it ended before the zones.
+    public static func pullTimedOut(_ error: Error?) -> Bool {
+        guard let error = error else { return false }
+        return (error as NSError).userInfo[timedOutKey] as? Bool == true
+    }
+
+    static let timedOutKey = "IceCreamPullTimedOut"
+
+    static func timedOutError(beforeZones: Bool) -> Error {
+        var userInfo: [String: Any] = [timedOutKey: true]
+        if beforeZones { userInfo[beforeZonesKey] = true }
+        return CKError(.operationCancelled, userInfo: userInfo)
+    }
 
     /// TV Club fork (tvclub.10): true for a pull's error from the database level, before any zone was fetched: an error
     /// that wasn't retried, or a retry past the wait limit. Until tvclub.10 those never called back, so a caller whose
