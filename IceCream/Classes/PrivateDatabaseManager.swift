@@ -242,10 +242,10 @@ final class PrivateDatabaseManager: DatabaseManager {
     /// completion would call back too. The operation's completion fetches again once, after the longest wait asked for, or
     /// calls `pull` back.
     ///
-    /// tvclub.11: a zone's changes are held until CloudKit ends their batch (a new zone token, or the zone's end), then
-    /// applied in one write (`Syncable.apply`), and only then does the zone's token move. A batch the operation doesn't
-    /// end (an error, a cancellation, the time limit) is dropped unapplied, its token unmoved, so the next pull fetches it
-    /// again. A batch that fails to apply ends the pull with its error.
+    /// tvclub.11: a zone's changes are held until CloudKit ends their batch (a new zone token, the zone's end, or the
+    /// operation's end without an error), then applied in one write (`Syncable.apply`), and only then does the zone's
+    /// token move. A batch the operation doesn't end (an error, a cancellation, the time limit) is dropped unapplied, its
+    /// token unmoved, so the next pull fetches it again. A batch that fails to apply ends the pull with its error.
     private func fetchChangesInZones(_ pull: PullCallback) {
         guard !pull.isFinished else { return }
         pull.reachedZones()
@@ -254,9 +254,9 @@ final class PrivateDatabaseManager: DatabaseManager {
         let fetchAgain = ZoneFetchAgain()
         let batches = ZoneBatches()
         
-        /// Applies the zone's held batch, then moves its token. Not when the pull has ended, and not when the apply fails:
-        /// that ends the pull and cancels the operation.
-        let endBatch: (CKRecordZone.ID, CKServerChangeToken?) -> Void = { [weak self, weak changesOp] zoneId, token in
+        /// Applies the zone's held batch, then moves its token (when there's one to move). Not when the pull has ended, and
+        /// not when the apply fails: that ends the pull and cancels the operation.
+        let endBatch: (CKRecordZone.ID, CKServerChangeToken??) -> Void = { [weak self, weak changesOp] zoneId, token in
             let changes = batches.take(zoneId)
             guard let self = self, !pull.isFinished else { return }
             guard let syncObject = self.syncObjects.first(where: { $0.zoneID == zoneId }) else { return }
@@ -268,11 +268,11 @@ final class PrivateDatabaseManager: DatabaseManager {
                 changesOp?.cancel()
                 return
             }
-            syncObject.zoneChangesToken = token
+            if let token = token { syncObject.zoneChangesToken = token }
         }
         
         changesOp.recordZoneChangeTokensUpdatedBlock = { zoneId, token, _ in
-            endBatch(zoneId, token)
+            endBatch(zoneId, .some(token))
         }
         
         changesOp.recordChangedBlock = { [weak self] record in
@@ -293,7 +293,7 @@ final class PrivateDatabaseManager: DatabaseManager {
             guard let self = self else { return }
             switch ErrorHandler.shared.resultType(with: error) {
             case .success:
-                endBatch(zoneId, token)
+                endBatch(zoneId, .some(token))
             case .retry(let timeToWait, _):
                 batches.drop(zoneId)
                 fetchAgain.retry(after: timeToWait, error: error)
@@ -318,7 +318,11 @@ final class PrivateDatabaseManager: DatabaseManager {
         // pending relationships are done when this completion runs, which it does on success, error and cancellation.
         let endWriteHold = WriteHoldWindow.open("IceCream pull")
         changesOp.fetchRecordZoneChangesCompletionBlock = { [weak self] error in
-            // A batch no zone ended is never applied.
+            // An operation that ended without an error ended every batch: one still held (no zone's completion came for
+            // it) is applied, and moves no token. After an error, one is never applied.
+            if error == nil {
+                batches.heldZones().forEach { endBatch($0, .none) }
+            }
             batches.dropAll()
             guard let self = self else {
                 endWriteHold()
@@ -498,6 +502,13 @@ final class ZoneBatches {
     
     func drop(_ zone: CKRecordZone.ID) {
         _ = take(zone)
+    }
+    
+    /// The zones with changes held.
+    func heldZones() -> [CKRecordZone.ID] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(held.keys)
     }
     
     func dropAll() {
